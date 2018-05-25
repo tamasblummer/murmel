@@ -49,3 +49,4 @@ pub mod dispatcher;
 pub mod lighningconnector;
 pub mod spv;
 pub mod blockfilter;
+pub mod filterstats;

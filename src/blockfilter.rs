@@ -107,8 +107,10 @@ impl <'a> BlockFilterWriter<'a> {
         for transaction in &self.block.txdata {
             if !transaction.is_coin_base() {
                 for input in &transaction.input {
-                    for d in input.script_sig.pushed_data() {
-                        self.writer.add_element(d.as_slice());
+                    if let Ok(data) = input.script_sig.pushed_data() {
+                        for d in data {
+                            self.writer.add_element(d.as_slice());
+                        }
                     }
                 }
             }
@@ -120,7 +122,7 @@ impl <'a> BlockFilterWriter<'a> {
     /// compile basic filter as of BIP158
     pub fn basic_filter (&mut self) -> Result<(), io::Error> {
         self.add_transaction_ids()?;
-        self.add_inputs();
+        self.add_inputs()?;
         self.add_output_scripts()
     }
 

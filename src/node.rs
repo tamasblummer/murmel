@@ -46,6 +46,7 @@ use std::sync::Mutex;
 use std::sync::RwLock;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use filterstats;
 
 /// a connected peer
 pub struct Peer {
@@ -236,16 +237,7 @@ impl Node {
 		if block_node.is_some() {
 			let bn = block_node.unwrap();
 			if bn.block.txdata.is_empty() && bn.is_on_main_chain(&blockchain) {
-				// limit context
-				{
-					// store a block if it is on the chain with most work
-					let mut db = self.db.lock().unwrap();
-					let tx = db.transaction()?;
-					tx.insert_block(&block)?;
-					tx.commit()?;
-				}
-				// send new block to lighning connector
-				self.connector.block_connected(&block, bn.height);
+                filterstats::filterstats (block);
 			}
 		}
 		Ok(ProcessResult::Ack)
