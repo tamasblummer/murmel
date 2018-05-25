@@ -36,4 +36,4 @@ rustc-serialize = "0.3"
 hex = "0.3"
 
 [patch.crates-io]
-bitcoin = { git = "https://github.com/tamasblummer/rust-bitcoin", branch = "master" }
+bitcoin = { git = "https://github.com/tamasblummer/rust-bitcoin", branch = "blockfilter" }
