@@ -25,13 +25,16 @@ use bitcoin_spv::spv::SPV;
 use log::Level;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::Path;
+use std::env;
 
 
 /// simple test drive that connects to a local bitcoind
 pub fn main() {
-    simple_logger::init_with_level(Level::Warn).unwrap();
+    simple_logger::init_with_level(Level::Info).unwrap();
     let mut peers = Vec::new();
+    let args: Vec<String> = env::args().collect();
     peers.push(SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1)), 8333));
-    let spv = SPV::new_in_memory("/rust-spv:0.1.0/".to_string(), Network::Bitcoin).unwrap();
+    let spv = SPV::new("/rust-spv:0.1.0/".to_string(), Network::Bitcoin, Path::new(&args[1])).unwrap();
     spv.run(peers, 1).unwrap();
 }
+
