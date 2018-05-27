@@ -202,15 +202,7 @@ impl Node {
 	}
 
 	fn block (&self, block: &Block, _: &Peer)-> Result<ProcessResult, SPVError> {
-		let blockchain = self.blockchain.lock().unwrap();
-		// header should be known already, otherwise it might be spam
-		let block_node = blockchain.get_block(block.bitcoin_hash());
-		if block_node.is_some() {
-			let bn = block_node.unwrap();
-			if bn.block.txdata.is_empty() && bn.is_on_main_chain(&blockchain) {
-                filterstats::filterstats (block);
-			}
-		}
+        filterstats::filterstats (block);
 		Ok(ProcessResult::Ack)
 	}
 
