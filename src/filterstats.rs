@@ -22,9 +22,11 @@ use bitcoin::blockdata::block::{Block, LoneBlockHeader};
 use bitcoin::network::encodable::{ConsensusEncodable, ConsensusDecodable};
 use bitcoin::network::serialize::{RawEncoder, RawDecoder};
 use bitcoin::network::serialize::BitcoinHash;
+use bitcoin::blockdata::opcodes::All;
 use blockfilter::BlockFilterWriter;
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use rand::{Rng, StdRng};
 
 static HEIGHT: AtomicUsize = AtomicUsize::new(1);
 
@@ -32,78 +34,48 @@ static HEIGHT: AtomicUsize = AtomicUsize::new(1);
 pub fn filterstats (block: &Block) {
     let block_size = encode (block).unwrap().len();
     let height = HEIGHT.fetch_add(1, Ordering::Relaxed);
-    let basic = basic_filter_size(block);
-    let extended = extended_filter_size (block);
-    let txid = txid_filter_size(block);
-    let inputs = inputs_filter_size(block);
-    let outputs = outputs_filter_size(block);
-    let wittness = wittness_filter_size(block);
-    let data = data_filter_size(block);
-    println! ("{},{},{},{},{},{},{},{},{},{}", height, block.header.time, block_size, basic, extended, txid, inputs, outputs, wittness, data);
-}
+    let script_filter = script_filter_size(block);
+    let unused_scripts = unused_scripts();
 
-fn basic_filter_size(block: &Block) -> usize {
     let mut data = Vec::new();
     let mut cursor = io::Cursor::new(&mut data);
     let mut writer = BlockFilterWriter::new(&mut cursor, block);
     writer.basic_filter().unwrap();
-    let size = writer.finish().unwrap();
-    size
+    let filter_size = writer.finish().unwrap();
+
+    println! ("{},{},{},{},{},{},{},{}", height, block_size, filter_size,
+              false_positive(&unused_scripts, 100),
+              false_positive(&unused_scripts, 200),
+              false_positive(&unused_scripts, 400),
+              false_positive(&unused_scripts, 800),
+              false_positive(&unused_scripts, 1600));
 }
 
-fn extended_filter_size(block: &Block) -> usize {
+fn unused_scripts() -> Vec<Vec<u8>> {
+    let mut unused_scripts = Vec::with_capacity(1600);
+    let mut rng = StdRng::new().unwrap();
+
+    for _ in 0..1600 {
+        let mut script = Vec::with_capacity(23);
+        let mut fake_address = [0u8;20];
+        rng.fill_bytes(&mut fake_address);
+        script.push(All::OP_HASH160 as u8);
+        script.append(&mut fake_address.to_vec());
+        script.push(All::OP_EQUAL as u8);
+        unused_scripts.push(script);
+    }
+    unused_scripts
+}
+
+fn false_positive (unused_scripts :&Vec<Vec<u8>>, n: u16) -> bool {
+    false
+}
+
+fn script_filter_size(block: &Block) -> usize {
     let mut data = Vec::new();
     let mut cursor = io::Cursor::new(&mut data);
     let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.extended_filter().unwrap();
-    let size = writer.finish().unwrap();
-    size
-}
-
-
-fn txid_filter_size(block: &Block) -> usize {
-    let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.add_transaction_ids().unwrap();
-    let size = writer.finish().unwrap();
-    size
-}
-
-
-
-fn inputs_filter_size(block: &Block) -> usize {
-    let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.add_inputs().unwrap();
-    let size = writer.finish().unwrap();
-    size
-}
-
-fn outputs_filter_size(block: &Block) -> usize {
-    let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.add_output_scripts().unwrap();
-    let size = writer.finish().unwrap();
-    size
-}
-
-fn wittness_filter_size(block: &Block) -> usize {
-    let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.add_wittness().unwrap();
-    let size = writer.finish().unwrap();
-    size
-}
-
-fn data_filter_size(block: &Block) -> usize {
-    let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.add_data_push().unwrap();
+    writer.basic_filter().unwrap();
     let size = writer.finish().unwrap();
     size
 }
