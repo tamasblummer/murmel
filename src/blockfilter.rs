@@ -50,16 +50,20 @@ impl <'a> BlockFilterWriter<'a> {
         BlockFilterWriter { block, writer }
     }
 
+    /// add arbitary data to filter
+    pub fn add_element (&mut self, element: &[u8]) {
+        self.writer.add_element(element);
+    }
+
     /// Add transaction ids of the block to the filter
-    pub fn add_transaction_ids (&mut self) -> Result<(), io::Error> {
+    pub fn add_transaction_ids (&mut self) {
         for transaction in &self.block.txdata {
             self.writer.add_element(&transaction.txid().data());
         }
-        Ok(())
     }
 
     /// Add consumed inputs of the block
-    pub fn add_inputs (&mut self) -> Result<(), io::Error> {
+    pub fn add_inputs (&mut self) -> Result<(), io::Error>{
         for transaction in &self.block.txdata {
             // if not coin base
             if !transaction.is_coin_base() {
@@ -76,17 +80,16 @@ impl <'a> BlockFilterWriter<'a> {
     }
 
     /// Add output scripts of the block
-    pub fn add_output_scripts (&mut self) -> Result<(), io::Error> {
+    pub fn add_output_scripts (&mut self) {
         for transaction in &self.block.txdata {
             for output in &transaction.output {
                 self.writer.add_element(output.script_pubkey.data().as_slice());
             }
         }
-        Ok(())
     }
 
     /// Add wittness data of the block
-    pub fn add_wittness (&mut self) -> Result<(), io::Error> {
+    pub fn add_wittness (&mut self) {
         for transaction in &self.block.txdata {
             if !transaction.is_coin_base() {
                 for input in &transaction.input {
@@ -96,11 +99,10 @@ impl <'a> BlockFilterWriter<'a> {
                 }
             }
         }
-        Ok(())
     }
 
     /// add data pushed in input scripts of the block
-    pub fn add_data_push (&mut self) -> Result<(), io::Error> {
+    pub fn add_data_push (&mut self) {
         for transaction in &self.block.txdata {
             if !transaction.is_coin_base() {
                 for input in &transaction.input {
@@ -112,21 +114,20 @@ impl <'a> BlockFilterWriter<'a> {
                 }
             }
         }
-        Ok(())
     }
 
 
     /// compile basic filter as of BIP158
     pub fn basic_filter (&mut self) -> Result<(), io::Error> {
-        self.add_transaction_ids()?;
-        self.add_inputs()?;
-        self.add_output_scripts()
+        self.add_transaction_ids();
+        self.add_output_scripts();
+        self.add_inputs()
     }
 
     /// compile extended filter as of BIP158
-    pub fn extended_filter (&mut self) -> Result<(), io::Error> {
-        self.add_wittness()?;
-        self.add_data_push()
+    pub fn extended_filter (&mut self) {
+        self.add_wittness();
+        self.add_data_push();
     }
 
     /// Write block filter
@@ -462,7 +463,7 @@ mod test {
             let mut constructed_extended = Cursor::new(Vec::new());
             {
                 let mut writer = BlockFilterWriter::new(&mut constructed_extended, &block);
-                writer.extended_filter().unwrap();
+                writer.extended_filter();
                 writer.finish().unwrap();
             }
             assert_eq!(extended_filter, constructed_extended.into_inner());
