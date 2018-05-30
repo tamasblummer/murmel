@@ -19,11 +19,12 @@
 
 use bitcoin;
 use bitcoin::blockdata::block::{Block, LoneBlockHeader};
+use bitcoin::util::hash::Sha256dHash;
 use bitcoin::network::encodable::{ConsensusEncodable, ConsensusDecodable};
 use bitcoin::network::serialize::{RawEncoder, RawDecoder};
 use bitcoin::network::serialize::BitcoinHash;
 use bitcoin::blockdata::opcodes::All;
-use blockfilter::BlockFilterWriter;
+use blockfilter::{BlockFilterWriter, BlockFilterReader};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use rand::{Rng, StdRng};
@@ -36,19 +37,22 @@ pub fn filterstats (block: &Block) {
     let height = HEIGHT.fetch_add(1, Ordering::Relaxed);
     let script_filter = script_filter_size(block);
     let unused_scripts = unused_scripts();
+    let filter_size;
 
     let mut data = Vec::new();
-    let mut cursor = io::Cursor::new(&mut data);
-    let mut writer = BlockFilterWriter::new(&mut cursor, block);
-    writer.basic_filter().unwrap();
-    let filter_size = writer.finish().unwrap();
-
+    {
+        let mut cursor = io::Cursor::new(&mut data);
+        let mut writer = BlockFilterWriter::new(&mut cursor, block);
+        writer.add_output_scripts().unwrap();
+        filter_size = writer.finish().unwrap();
+    }
+    let ref block_hash = block.bitcoin_hash();
     println! ("{},{},{},{},{},{},{},{}", height, block_size, filter_size,
-              false_positive(&unused_scripts, 100),
-              false_positive(&unused_scripts, 200),
-              false_positive(&unused_scripts, 400),
-              false_positive(&unused_scripts, 800),
-              false_positive(&unused_scripts, 1600));
+              false_positive(block_hash, &data, &unused_scripts[0..100])*block_size,
+              false_positive(block_hash, &data, &unused_scripts[100.. 200])*block_size,
+              false_positive(block_hash, &data, &unused_scripts[200..400])*block_size,
+              false_positive(block_hash, &data, &unused_scripts[200..800])*block_size,
+              false_positive(block_hash, &data, &unused_scripts[800..1600])*block_size);
 }
 
 fn unused_scripts() -> Vec<Vec<u8>> {
@@ -67,8 +71,18 @@ fn unused_scripts() -> Vec<Vec<u8>> {
     unused_scripts
 }
 
-fn false_positive (unused_scripts :&Vec<Vec<u8>>, n: u16) -> bool {
-    false
+fn false_positive (block_hash: &Sha256dHash, data :&Vec<u8>, unused_scripts :&[Vec<u8>]) -> usize {
+    let mut reader = BlockFilterReader::new(block_hash).unwrap();
+    for script in unused_scripts {
+        reader.add_query_pattern(script.as_slice());
+    }
+    let ref mut cursor = io::Cursor::new(&data);
+    if reader.match_any(cursor).unwrap() {
+        1
+    }
+    else {
+        0
+    }
 }
 
 fn script_filter_size(block: &Block) -> usize {
