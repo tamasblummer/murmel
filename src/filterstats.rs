@@ -19,6 +19,7 @@
 
 use bitcoin;
 use bitcoin::blockdata::block::{Block, LoneBlockHeader};
+use bitcoin::blockdata::script::Script;
 use bitcoin::util::hash::Sha256dHash;
 use bitcoin::network::encodable::{ConsensusEncodable, ConsensusDecodable};
 use bitcoin::network::serialize::{RawEncoder, RawDecoder};
@@ -27,48 +28,75 @@ use bitcoin::blockdata::opcodes::All;
 use blockfilter::{BlockFilterWriter, BlockFilterReader};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::collections::HashMap;
 use rand::{Rng, StdRng};
 
 static HEIGHT: AtomicUsize = AtomicUsize::new(1);
+
+#[derive(Hash,Eq, PartialEq)]
+struct Outpoint {
+    hash: Sha256dHash,
+    index: u32
+}
 
 /// accumulate a block for the statistics
 pub fn filterstats (block: &Block) {
     let block_size = encode (block).unwrap().len();
     let height = HEIGHT.fetch_add(1, Ordering::Relaxed);
     let script_filter = script_filter_size(block);
-    let unused_scripts = unused_scripts();
+    let fake_scripts = fake_scripts();
     let filter_size;
+    let mut utxo_scripts : HashMap<Outpoint, Vec<u8>> = HashMap::new();
 
     let mut data = Vec::new();
     {
         let mut cursor = io::Cursor::new(&mut data);
         let mut writer = BlockFilterWriter::new(&mut cursor, block);
-        writer.add_output_scripts().unwrap();
+        writer.add_output_scripts();
+        for transaction in &block.txdata {
+            let txid = transaction.txid();
+            for (i, output) in transaction.output.iter().enumerate() {
+                let coin = Outpoint{hash: txid, index: i as u32};
+                utxo_scripts.insert(coin, output.script_pubkey.data());
+            }
+            if !transaction.is_coin_base() {
+                for i in 0..transaction.input.len() {
+                    let coin = Outpoint{hash: transaction.input[i].prev_hash, index: transaction.input[i].prev_index};
+                    writer.add_element(utxo_scripts.get(&coin).unwrap().as_slice());
+                    utxo_scripts.remove(&coin);
+                }
+            }
+        }
         filter_size = writer.finish().unwrap();
     }
     let ref block_hash = block.bitcoin_hash();
     println! ("{},{},{},{},{},{},{},{}", height, block_size, filter_size,
-              false_positive(block_hash, &data, &unused_scripts[0..100])*block_size,
-              false_positive(block_hash, &data, &unused_scripts[100.. 200])*block_size,
-              false_positive(block_hash, &data, &unused_scripts[200..400])*block_size,
-              false_positive(block_hash, &data, &unused_scripts[200..800])*block_size,
-              false_positive(block_hash, &data, &unused_scripts[800..1600])*block_size);
+              false_positive(block_hash, &data, &fake_scripts[0..100])*block_size,
+              false_positive(block_hash, &data, &fake_scripts[100.. 200])*block_size,
+              false_positive(block_hash, &data, &fake_scripts[200..400])*block_size,
+              false_positive(block_hash, &data, &fake_scripts[200..800])*block_size,
+              false_positive(block_hash, &data, &fake_scripts[800..1600])*block_size);
 }
 
-fn unused_scripts() -> Vec<Vec<u8>> {
+fn fake_scripts() -> Vec<Vec<u8>> {
     let mut unused_scripts = Vec::with_capacity(1600);
     let mut rng = StdRng::new().unwrap();
 
     for _ in 0..1600 {
-        let mut script = Vec::with_capacity(23);
-        let mut fake_address = [0u8;20];
-        rng.fill_bytes(&mut fake_address);
-        script.push(All::OP_HASH160 as u8);
-        script.append(&mut fake_address.to_vec());
-        script.push(All::OP_EQUAL as u8);
+        let script = fake_script(&mut rng);
         unused_scripts.push(script);
     }
     unused_scripts
+}
+
+fn fake_script(rng: &mut StdRng) -> Vec<u8> {
+    let mut script = Vec::with_capacity(23);
+    let mut fake_address = [0u8; 20];
+    rng.fill_bytes(&mut fake_address);
+    script.push(All::OP_HASH160 as u8);
+    script.append(&mut fake_address.to_vec());
+    script.push(All::OP_EQUAL as u8);
+    script
 }
 
 fn false_positive (block_hash: &Sha256dHash, data :&Vec<u8>, unused_scripts :&[Vec<u8>]) -> usize {
