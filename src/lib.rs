@@ -36,6 +36,10 @@ extern crate rusqlite;
 extern crate siphasher;
 extern crate mio;
 
+#[macro_use]
+extern crate lazy_static;
+
+
 pub mod node;
 pub mod database;
 pub mod error;

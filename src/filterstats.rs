@@ -29,14 +29,22 @@ use blockfilter::{BlockFilterWriter, BlockFilterReader};
 use std::io;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::collections::HashMap;
+use std::cmp::{Eq,PartialEq};
+use std::hash::{Hash, Hasher, BuildHasherDefault};
+use std::sync::Mutex;
+
 use rand::{Rng, StdRng};
 
 static HEIGHT: AtomicUsize = AtomicUsize::new(1);
 
-#[derive(Hash,Eq, PartialEq)]
+#[derive(Debug,Hash,Eq, PartialEq)]
 struct Outpoint {
     hash: Sha256dHash,
     index: u32
+}
+
+lazy_static! {
+    static ref UTXO: Mutex<HashMap<Outpoint, Vec<u8>>> = Mutex::new(HashMap::new());
 }
 
 /// accumulate a block for the statistics
@@ -46,7 +54,7 @@ pub fn filterstats (block: &Block) {
     let script_filter = script_filter_size(block);
     let fake_scripts = fake_scripts();
     let filter_size;
-    let mut utxo_scripts : HashMap<Outpoint, Vec<u8>> = HashMap::new();
+    let mut utxo_scripts = UTXO.lock().unwrap();
 
     let mut data = Vec::new();
     {
