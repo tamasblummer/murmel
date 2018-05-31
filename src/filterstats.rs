@@ -78,7 +78,7 @@ pub fn filterstats (block: &Block) {
         filter_size = writer.finish().unwrap();
     }
     let ref block_hash = block.bitcoin_hash();
-    println! ("{},{},{},{},{},{},{},{}", height, block_size, filter_size,
+    println! ("{},{},{},{},{},{},{},{},{}", height, block_size, utxo_scripts.len(), filter_size,
               false_positive(block_hash, &data, &fake_scripts[0..100])*block_size,
               false_positive(block_hash, &data, &fake_scripts[100.. 200])*block_size,
               false_positive(block_hash, &data, &fake_scripts[200..400])*block_size,
