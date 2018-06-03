@@ -51,9 +51,9 @@ lazy_static! {
 pub fn filterstats (block: &Block) {
     let block_size = encode (block).unwrap().len();
     let height = HEIGHT.fetch_add(1, Ordering::Relaxed);
-    let script_filter = script_filter_size(block);
+    let basic_filter = basic_filter_size(block);
     let fake_scripts = fake_scripts();
-    let filter_size;
+    let script_filter_size;
     let mut utxo_scripts = UTXO.lock().unwrap();
 
     let mut data = Vec::new();
@@ -75,15 +75,12 @@ pub fn filterstats (block: &Block) {
                 }
             }
         }
-        filter_size = writer.finish().unwrap();
+        script_filter_size = writer.finish().unwrap();
     }
     let ref block_hash = block.bitcoin_hash();
-    println! ("{},{},{},{},{},{},{},{},{}", height, block_size, utxo_scripts.len(), filter_size,
-              false_positive(block_hash, &data, &fake_scripts[0..100])*block_size,
-              false_positive(block_hash, &data, &fake_scripts[100.. 200])*block_size,
-              false_positive(block_hash, &data, &fake_scripts[200..400])*block_size,
-              false_positive(block_hash, &data, &fake_scripts[200..800])*block_size,
-              false_positive(block_hash, &data, &fake_scripts[800..1600])*block_size);
+    println! ("{},{},{},{},{},{}", height, block_size, utxo_scripts.len(),
+              script_filter_size, basic_filter,
+              false_positive(block_hash, &data, &fake_scripts[0..100])*block_size);
 }
 
 fn fake_scripts() -> Vec<Vec<u8>> {
@@ -121,7 +118,7 @@ fn false_positive (block_hash: &Sha256dHash, data :&Vec<u8>, unused_scripts :&[V
     }
 }
 
-fn script_filter_size(block: &Block) -> usize {
+fn basic_filter_size(block: &Block) -> usize {
     let mut data = Vec::new();
     let mut cursor = io::Cursor::new(&mut data);
     let mut writer = BlockFilterWriter::new(&mut cursor, block);
