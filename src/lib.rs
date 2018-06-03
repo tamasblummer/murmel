@@ -27,8 +27,8 @@
 
 extern crate bitcoin;
 extern crate bitcoin_chain;
-extern crate libc;
 extern crate lightning;
+extern crate libc;
 #[macro_use]
 extern crate log;
 extern crate rand;
@@ -43,7 +43,7 @@ extern crate lazy_static;
 pub mod node;
 pub mod database;
 pub mod error;
-pub mod lighningconnector;
+pub mod connector;
 pub mod spv;
 pub mod blockfilter;
 pub mod p2p;

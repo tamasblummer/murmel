@@ -34,7 +34,8 @@ use std::collections::HashSet;
 use std::hash::Hasher;
 use std::io;
 
-const GOLOMB_RICE_PARAMETER: u8 = 20;
+const P: u8 = 19;
+const M: u64 = 784931;
 
 /// Compiles and writes a block filter
 pub struct BlockFilterWriter<'a> {
@@ -50,20 +51,8 @@ impl <'a> BlockFilterWriter<'a> {
         BlockFilterWriter { block, writer }
     }
 
-    /// add arbitary data to filter
-    pub fn add_element (&mut self, element: &[u8]) {
-        self.writer.add_element(element);
-    }
-
-    /// Add transaction ids of the block to the filter
-    pub fn add_transaction_ids (&mut self) {
-        for transaction in &self.block.txdata {
-            self.writer.add_element(&transaction.txid().data());
-        }
-    }
-
     /// Add consumed inputs of the block
-    pub fn add_inputs (&mut self) -> Result<(), io::Error>{
+    pub fn add_inputs (&mut self) -> Result<(), io::Error> {
         for transaction in &self.block.txdata {
             // if not coin base
             if !transaction.is_coin_base() {
@@ -80,54 +69,25 @@ impl <'a> BlockFilterWriter<'a> {
     }
 
     /// Add output scripts of the block
-    pub fn add_output_scripts (&mut self) {
+    pub fn add_output_scripts (&mut self) -> Result<(), io::Error> {
         for transaction in &self.block.txdata {
             for output in &transaction.output {
                 self.writer.add_element(output.script_pubkey.data().as_slice());
             }
         }
+        Ok(())
     }
 
-    /// Add wittness data of the block
-    pub fn add_wittness (&mut self) {
-        for transaction in &self.block.txdata {
-            if !transaction.is_coin_base() {
-                for input in &transaction.input {
-                    for w in &input.witness {
-                        self.writer.add_element(w.as_slice());
-                    }
-                }
-            }
-        }
+    /// add an arbitary element
+    pub fn add_element (&mut self, element: &[u8]) -> Result<(), io::Error> {
+        self.writer.add_element(element);
+        Ok(())
     }
-
-    /// add data pushed in input scripts of the block
-    pub fn add_data_push (&mut self) {
-        for transaction in &self.block.txdata {
-            if !transaction.is_coin_base() {
-                for input in &transaction.input {
-                    if let Ok(data) = input.script_sig.pushed_data() {
-                        for d in data {
-                            self.writer.add_element(d.as_slice());
-                        }
-                    }
-                }
-            }
-        }
-    }
-
 
     /// compile basic filter as of BIP158
     pub fn basic_filter (&mut self) -> Result<(), io::Error> {
-        self.add_transaction_ids();
-        self.add_output_scripts();
-        self.add_inputs()
-    }
-
-    /// compile extended filter as of BIP158
-    pub fn extended_filter (&mut self) {
-        self.add_wittness();
-        self.add_data_push();
+        self.add_inputs()?;
+        self.add_output_scripts()
     }
 
     /// Write block filter
@@ -203,8 +163,9 @@ impl GCSFilterReader {
         // map hashes to [0, n_elements << grp]
         let mut mapped = Vec::new();
         mapped.reserve(self.query.len());
+        let nm = n_elements.0 * M;
         for h in &self.query {
-            mapped.push(map_to_range(*h, n_elements.0));
+            mapped.push(map_to_range(*h, nm));
         }
         // sort
         mapped.sort();
@@ -233,8 +194,9 @@ impl GCSFilterReader {
     }
 }
 
-fn map_to_range (hash: u64, n_elements: u64) -> u64 {
-    (((hash as u128) * ((n_elements as u128) << GOLOMB_RICE_PARAMETER)) >> 64) as u64
+// fast reduction of hash to [0, nm) range
+fn map_to_range (hash: u64, nm: u64) -> u64 {
+    ((hash as u128 * nm as u128) >> 64) as u64
 }
 
 struct GCSFilterWriter<'a> {
@@ -259,11 +221,13 @@ impl<'a> GCSFilterWriter<'a> {
         let mut encoder = RawEncoder::new(io::Cursor::new(Vec::new()));
         VarInt(self.elements.len() as u64).consensus_encode(&mut encoder).unwrap();
         let mut wrote = self.writer.write(encoder.into_inner().into_inner().as_slice())?;
-        // map hashes to [0, n_elements << grp]
+        // map hashes to [0, n_elements * M)
         let mut mapped = Vec::new();
-        mapped.reserve(self.elements.len());
+        let n = self.elements.len();
+        mapped.reserve(n);
+        let nm = n as u64 * M;
         for h in &self.elements {
-            mapped.push(map_to_range(*h, self.elements.len() as u64));
+            mapped.push(map_to_range(*h, nm));
         }
         // sort
         mapped.sort();
@@ -294,14 +258,14 @@ impl GCSFilter {
     /// Golomb-Rice encode a number n to a bit stream (Parameter 2^k)
     fn golomb_rice_encode (&self, writer: &mut BitStreamWriter, n: u64) -> Result<usize, io::Error> {
         let mut wrote = 0;
-        let mut q = n >> GOLOMB_RICE_PARAMETER;
+        let mut q = n >> P;
         while q > 0 {
             let nbits = cmp::min(q, 64);
             wrote += writer.write(!0u64, nbits as u8)?;
             q -= nbits;
         }
         wrote += writer.write(0, 1)?;
-        wrote += writer.write(n, GOLOMB_RICE_PARAMETER)?;
+        wrote += writer.write(n, P)?;
         Ok(wrote)
     }
 
@@ -311,8 +275,8 @@ impl GCSFilter {
         while reader.read(1)? == 1 {
             q += 1;
         }
-        let r = reader.read(GOLOMB_RICE_PARAMETER)?;
-        return Ok((q << GOLOMB_RICE_PARAMETER) + r);
+        let r = reader.read(P)?;
+        return Ok((q << P) + r);
     }
 
     /// Hash an arbitary slice with siphash using parameters of this filter
@@ -438,7 +402,7 @@ mod test {
     #[test]
     fn test_blockfilters () {
         let mut d = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-        d.push("test/blockfilters.json");
+        d.push("tests/blockfilters.json");
         let mut file = File::open(d).unwrap();
         let mut data = String::new();
         file.read_to_string(&mut data).unwrap();
@@ -450,23 +414,15 @@ mod test {
             let block :Block = decode (hex::decode(test_case[2].as_string().unwrap()).unwrap()).unwrap();
             assert_eq!(block.bitcoin_hash(), block_hash);
 
-            let basic_filter = hex::decode(test_case[5].as_string().unwrap()).unwrap();
+            let basic_filter = hex::decode(test_case[4].as_string().unwrap()).unwrap();
             let mut constructed_basic = Cursor::new(Vec::new());
             {
                 let mut writer = BlockFilterWriter::new(&mut constructed_basic, &block);
                 writer.basic_filter().unwrap();
                 writer.finish().unwrap();
             }
+            println!("test {}", t);
             assert_eq!(basic_filter, constructed_basic.into_inner());
-
-            let extended_filter = hex::decode(test_case[6].as_string().unwrap()).unwrap();
-            let mut constructed_extended = Cursor::new(Vec::new());
-            {
-                let mut writer = BlockFilterWriter::new(&mut constructed_extended, &block);
-                writer.extended_filter();
-                writer.finish().unwrap();
-            }
-            assert_eq!(extended_filter, constructed_extended.into_inner());
         }
     }
 
@@ -476,9 +432,8 @@ mod test {
         let mut rng = rand::thread_rng();
         let mut patterns = HashSet::new();
         for _ in 0..1000 {
-
-            use std::mem::transmute;
-            let bytes: [u8; 8] = unsafe { transmute(rng.next_u64().to_be()) };
+            let mut bytes = [0u8; 8];
+            rng.fill_bytes(&mut bytes);
             patterns.insert(bytes);
         }
         {

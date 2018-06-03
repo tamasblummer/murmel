@@ -27,7 +27,8 @@ use node::Node;
 use p2p::P2P;
 use std::net::SocketAddr;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
+use p2p::PeerMap;
 
 /// The complete SPV stack
 pub struct SPV{
@@ -41,32 +42,30 @@ impl SPV {
     ///      network - main or testnet
     ///      bootstrap - peer adresses (only tested to work with one local node for now)
     ///      db - file path to store the headers and blocks database
-    ///      birth - unix time stamp. We are interested in transactions only after this birth day
     /// The method will read previously stored headers from the database and sync up with the peers
     /// then serve the returned ChainWatchInterface
     pub fn new(user_agent :String, network: Network, db: &Path) -> Result<SPV, SPVError> {
-        let mut db = DB::new(db)?;
-        let birth = create_tables(&mut db)?;
-        let p2p = Arc::new(P2P::new(user_agent, network, 0));
-        let node = Arc::new(Node::new(p2p.clone(), network, Arc::new(Mutex::new(db)),
-                                      birth));
-        Ok(SPV{ node, p2p})
+        let db = Arc::new(Mutex::new(DB::new(db)?));
+        let birth = create_tables(db.clone())?;
+        let peers = Arc::new(RwLock::new(PeerMap::new()));
+        let p2p = Arc::new(P2P::new(user_agent, network, 0, peers.clone(), db.clone()));
+        let node = Arc::new(Node::new(p2p.clone(), network, db.clone(), birth, peers.clone()));
+        Ok(SPV{ node, p2p })
     }
 
     /// Initialize the SPV stack and return a ChainWatchInterface
     /// Set
     ///      network - main or testnet
     ///      bootstrap - peer adresses (only tested to work with one local node for now)
-    ///      birth - unix time stamp. We are interested in transactions only after this birth day
     /// The method will start with an empty in-memory database and sync up with the peers
     /// then serve the returned ChainWatchInterface
     pub fn new_in_memory(user_agent :String, network: Network) -> Result<SPV, SPVError> {
-        let mut db = DB::mem()?;
-        let birth = create_tables(&mut db)?;
-        let p2p = Arc::new(P2P::new(user_agent, network, 0));
-        let node = Arc::new(Node::new(p2p.clone(), network, Arc::new(Mutex::new(db)),
-                                      0));
-        Ok(SPV{ node, p2p})
+        let db = Arc::new(Mutex::new(DB::mem()?));
+        let birth = create_tables(db.clone())?;
+        let peers = Arc::new(RwLock::new(PeerMap::new()));
+        let p2p = Arc::new(P2P::new(user_agent, network, 0, peers.clone(), db.clone()));
+        let node = Arc::new(Node::new(p2p.clone(), network, db.clone(), birth, peers.clone()));
+        Ok(SPV{ node, p2p })
     }
 
 	/// Start the SPV stack. This should be called AFTER registering listener of the ChainWatchInterface,
@@ -90,7 +89,8 @@ impl SPV {
 }
 
 /// create tables (if not already there) in the database
-fn create_tables(db: &mut DB) -> Result<u32, SPVError> {
+fn create_tables(db: Arc<Mutex<DB>>) -> Result<u32, SPVError> {
+    let mut db = db.lock().unwrap();
     let tx = db.transaction()?;
     let birth = tx.create_tables()?;
     tx.commit()?;

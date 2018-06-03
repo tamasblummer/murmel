@@ -33,13 +33,13 @@ use bitcoin::util::hash::Sha256dHash;
 use bitcoin_chain::blockchain::Blockchain;
 use database::DB;
 use error::SPVError;
-use lighningconnector::LightningConnector;
+use connector::LightningConnector;
 use lightning::chain::chaininterface::BroadcasterInterface;
-use p2p::{P2P, Peer};
+use p2p::{P2P, PeerId, PeerMap};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
+use std::sync::{RwLock, Mutex};
 use filterstats;
 
 
@@ -47,30 +47,57 @@ use filterstats;
 pub enum ProcessResult {
     /// Acknowledgment
     Ack,
-    /// Acknowledgment, dispatcher should indicate the new height in future version messages
+    /// Acknowledgment, P2P should indicate the new height in future version messages
     Height(u32),
-    /// The message was ignored by the node
-    Ignored,
     /// The node really does not like the message (or ban score limit reached), disconnect this rouge peer
     Disconnect,
+    /// message ignored
+    Ignored,
+}
+
+
+/// a helper class to implement LightningConnector
+pub struct Broadcaster{
+    // the peer map shared with node and P2P
+    peers: Arc<RwLock<PeerMap>>
+}
+
+impl BroadcasterInterface for Broadcaster {
+    /// send a transaction to all connected peers
+    fn broadcast_transaction(&self, tx: &Transaction) {
+        let txid = tx.txid();
+        for (pid, peer) in self.peers.read().unwrap().iter() {
+            debug!("send tx {} peer={}", txid, pid);
+            peer.lock().unwrap().send(&NetworkMessage::Tx(tx.clone())).unwrap_or(());
+        }
+    }
 }
 
 /// The local node processing incoming messages
 pub struct Node {
+    // the connected P2P network
     p2p: Arc<P2P>,
+    // peer map shared with P2P and the LightningConnector's broadcaster
+    peers: Arc<RwLock<PeerMap>>,
+    // type of the connected network
     network: Network,
+    // the in-memory blockchain storing headers
     blockchain: Mutex<Blockchain>,
+    // the persistent blockchain storing previously downloaded header and blocks
     db: Arc<Mutex<DB>>,
+    // connector serving Layer 2 network
     connector: Arc<LightningConnector>,
+    // unix time stamp of birth. Do not process blocks before this time point, but strictly after.
 	birth: u32
 }
 
 impl Node {
-    /// Create a new local node for a network that uses the given database
-    pub fn new(p2p: Arc<P2P>, network: Network, db: Arc<Mutex<DB>>, birth: u32) -> Node {
-        let connector = LightningConnector::new(Arc::new(Broadcaster{}));
+    /// Create a new local node
+    pub fn new(p2p: Arc<P2P>, network: Network, db: Arc<Mutex<DB>>, birth: u32, peers: Arc<RwLock<PeerMap>>) -> Node {
+        let connector = LightningConnector::new(Arc::new(Broadcaster{peers: peers.clone ()}));
         Node {
             p2p,
+            peers,
             network,
             blockchain: Mutex::new(Blockchain::new(network)),
             db,
@@ -82,12 +109,13 @@ impl Node {
     /// Load headers from database
     pub fn load_headers(&self) -> Result<(), SPVError> {
         info!("loading headers from database...");
+        // always lock blockchain before db
+        let mut blockchain = self.blockchain.lock().unwrap();
         let mut db = self.db.lock().unwrap();
         let tx = db.transaction()?;
         if let Ok(tip) = tx.get_tip() {
             let mut n = 0;
             let genesis = genesis_block(self.network);
-            let mut blockchain = self.blockchain.lock().unwrap();
             info!("reading headers ...");
             let headers = tx.get_headers(&genesis.bitcoin_hash(), &tip)?;
             info!("building in-memory header chain ...");
@@ -105,17 +133,18 @@ impl Node {
     }
 
 	/// called from dispatcher whenever a new peer is connected (after handshake is successful)
-    pub fn connected(&self, peer: &Peer) -> Result<ProcessResult, SPVError> {
-        self.get_headers(peer)
+    pub fn connected(&self, pid: PeerId) -> Result<ProcessResult, SPVError> {
+        self.get_headers(pid)?;
+        Ok(ProcessResult::Ack)
     }
 
     /// called from dispatcher whenever a peer is disconnected
-    pub fn disconnected(&self, _peer: &Peer) -> Result<ProcessResult, SPVError> {
+    pub fn disconnected(&self, _pid: PeerId) -> Result<ProcessResult, SPVError> {
         Ok(ProcessResult::Ack)
     }
 
     /// Process incoming messages
-    pub fn process(&self, msg: &NetworkMessage, peer: &Peer) -> Result<ProcessResult, SPVError> {
+    pub fn process(&self, msg: &NetworkMessage, peer: PeerId) -> Result<ProcessResult, SPVError> {
         match msg {
             &NetworkMessage::Ping(nonce) => self.ping(nonce, peer),
             &NetworkMessage::Headers(ref v) => self.headers(v, peer),
@@ -126,16 +155,21 @@ impl Node {
         }
     }
 
-	fn ping (&self, nonce: u64, peer :&Peer) -> Result<ProcessResult, SPVError> {
-		self.reply(peer, &NetworkMessage::Pong(nonce))
+    // send a ping to peer
+	fn ping (&self, nonce: u64, peer :PeerId) -> Result<ProcessResult, SPVError> {
+		self.send(peer, &NetworkMessage::Pong(nonce))
 	}
 
-	fn headers(&self, headers: &Vec<LoneBlockHeader>, peer: &Peer) -> Result<ProcessResult, SPVError> {
+    // process headers message
+	fn headers(&self, headers: &Vec<LoneBlockHeader>, peer: PeerId) -> Result<ProcessResult, SPVError> {
 		if headers.len() > 0 {
 			// blocks we want to download
 			let mut ask_for_blocks = Vec::new();
+            // headers to unwind due to re-org
 			let mut disconnected_headers = Vec::new();
+            // current height
 			let height;
+            // some received headers were not yet known
             let mut some_new = false;
 			{
 				// new scope to limit lock
@@ -155,6 +189,7 @@ impl Node {
 						let new_tip = blockchain.best_tip_hash();
                         tip_moved = tip_moved || new_tip != old_tip;
 						let header_hash = header.header.bitcoin_hash();
+                        // ask for blocks after birth
 						if header.header.time > self.birth && new_tip == header_hash {
 							ask_for_blocks.push(new_tip);
 						}
@@ -179,12 +214,14 @@ impl Node {
 
                 if tip_moved {
                     info!("received {} headers new tip={} from peer={}", headers.len(),
-                          blockchain.best_tip_hash(), peer.pid);
+                          blockchain.best_tip_hash(), peer);
                 } else {
-                    debug!("received {} orphan headers from peer={}", headers.len(), peer.pid);
+                    debug!("received {} orphan headers from peer={}", headers.len(), peer);
+                    ask_for_blocks.clear();
                 }
 			}
 
+            // notify lightning connector of disconnected blocks
 			for header in disconnected_headers {
 				self.connector.block_disconnected(&header);
 			}
@@ -201,13 +238,15 @@ impl Node {
 		}
 	}
 
-	fn block (&self, block: &Block, _: &Peer)-> Result<ProcessResult, SPVError> {
+	fn block (&self, block: &Block, _: PeerId)-> Result<ProcessResult, SPVError> {
         filterstats::filterstats (block);
 		Ok(ProcessResult::Ack)
 	}
 
-	fn inv(&self, v: &Vec<Inventory>, peer: &Peer) -> Result<ProcessResult, SPVError> {
+    // process an incoming inventory announcement
+	fn inv(&self, v: &Vec<Inventory>, peer: PeerId) -> Result<ProcessResult, SPVError> {
 		for inventory in v {
+            // only care of blocks
 			if inventory.inv_type == InvType::Block
 				&& self.blockchain.lock().unwrap().get_block(inventory.hash).is_none() {
 				// ask for header(s) if observing a new block
@@ -218,7 +257,9 @@ impl Node {
 		Ok(ProcessResult::Ack)
 	}
 
-	fn addr (&self, v: &Vec<(u32, Address)>, _peer: &Peer)  -> Result<ProcessResult, SPVError> {
+    // process incoming addr messages
+	fn addr (&self, v: &Vec<(u32, Address)>, _peer: PeerId)  -> Result<ProcessResult, SPVError> {
+        // store if interesting, that is ...
 		let now = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_secs() as u32;
 		let mut db = self.db.lock().unwrap();
 		let tx = db.transaction()?;
@@ -237,43 +278,52 @@ impl Node {
 	}
 
     /// get the blocks we are interested in
-    fn get_blocks(&self, peer: &Peer, blocks: Vec<Sha256dHash>) -> Result<ProcessResult, SPVError> {
-        let mut invs = Vec::new();
-        for b in blocks {
-            invs.push(Inventory {
-                inv_type: InvType::WitnessBlock,
-                hash: b,
-            });
+    fn get_blocks(&self, peer: PeerId, blocks: Vec<Sha256dHash>) -> Result<ProcessResult, SPVError> {
+        if blocks.len () > 0 {
+            let mut invs = Vec::new();
+            for b in blocks {
+                invs.push(Inventory {
+                    inv_type: InvType::WitnessBlock,
+                    hash: b,
+                });
+            }
+            return self.send(peer, &NetworkMessage::GetData(invs))
         }
-        self.reply(peer, &NetworkMessage::GetData(invs))
-    }
-
-    /// get headers this peer is ahead of us
-    fn get_headers(&self, peer: &Peer) -> Result<ProcessResult, SPVError> {
-        let locator = self.blockchain.lock().unwrap().locator_hashes();
-        let last = if locator.len() > 0 {
-            *locator.last().unwrap()
-        } else {
-            Sha256dHash::default()
-        };
-        self.reply(peer, &NetworkMessage::GetHeaders(GetHeadersMessage::new(locator, last)))
-    }
-
-    /// Reply to peer
-    fn reply(&self, peer: &Peer, msg: &NetworkMessage) -> Result<ProcessResult, SPVError> {
-        peer.send(msg)?;
         Ok(ProcessResult::Ack)
     }
 
-    /// send a new transaction to all peers
-    fn send_transaction(&self, tx: Transaction) -> Result<ProcessResult, SPVError> {
-        self.broadcast(&NetworkMessage::Tx(tx))
+    /// get headers this peer is ahead of us
+    fn get_headers(&self, peer: PeerId) -> Result<ProcessResult, SPVError> {
+        let locator = self.blockchain.lock().unwrap().locator_hashes();
+        if locator.len() > 0 {
+            let last = if locator.len() > 0 {
+                *locator.last().unwrap()
+            } else {
+                Sha256dHash::default()
+            };
+            return self.send(peer, &NetworkMessage::GetHeaders(GetHeadersMessage::new(locator, last)))
+        }
+        Ok(ProcessResult::Ack)
+    }
+
+    /// send to peer
+    fn send(&self, peer: PeerId, msg: &NetworkMessage) -> Result<ProcessResult, SPVError> {
+        if let Some(sender) = self.peers.read().unwrap().get(&peer) {
+            sender.lock().unwrap().send (msg)?;
+        }
+        Ok(ProcessResult::Ack)
     }
 
     /// send the same message to all connected peers
     fn broadcast(&self, msg: &NetworkMessage) -> Result<ProcessResult, SPVError> {
-        self.p2p.broadcast(msg)?;
+        for (_, sender) in self.peers.read().unwrap().iter() {
+            sender.lock().unwrap().send(msg)?;
+        }
         Ok(ProcessResult::Ack)
+    }
+    /// send a transaction to all connected peers
+    pub fn broadcast_transaction(&self, tx: &Transaction) -> Result<ProcessResult, SPVError>  {
+        self.broadcast(&NetworkMessage::Tx(tx.clone()))
     }
 
 	/// retrieve the interface for lighning network
@@ -284,15 +334,6 @@ impl Node {
 	/// retrieve the interface a higher application layer e.g. lighning may use to send transactions to the network
     pub fn get_broadcaster (&self) -> Arc<Broadcaster> {
         self.connector.get_broadcaster()
-    }
-}
-
-/// a helper class to implement LightningConnector
-pub struct Broadcaster;
-
-impl BroadcasterInterface for Broadcaster {
-    fn broadcast_transaction(&self, tx: &Transaction) {
-        // TODO
     }
 }
 
